@@ -2,7 +2,7 @@
 
 A small macOS desktop widget that shows your [HEY Calendar](https://www.hey.com/calendar/) day as a timeline. It sits on the desktop (or floats above windows) and talks to HEY through the official [`hey` CLI](https://www.hey.com/agents/).
 
-<p align="center"><img src="docs/screenshot.png" width="321" alt="HeyDay widget showing a day timeline"></p>
+![HeyDay on the macOS desktop, showing a day timeline](docs/screenshot-desktop.png)
 
 ## Features
 
@@ -65,7 +65,10 @@ New events go to your **Personal** calendar by default; pick another in Settings
 
 ```sh
 HEYDAY_DEMO=1 HEYDAY_SNAPSHOT=$PWD/docs/screenshot.png ./build/HeyDay.app/Contents/MacOS/HeyDay
+swift scripts/desktop-shot.swift docs/screenshot.png docs/screenshot-desktop.png
 ```
+
+The second command places it on a generated desktop for the README image.
 
 ## License
 
