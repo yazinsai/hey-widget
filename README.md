@@ -33,7 +33,7 @@ A small macOS desktop widget that shows your [HEY Calendar](https://www.hey.com/
 
    ```sh
    hey auth status
-   hey event day today
+   hey calendar list
    ```
 
 3. Build and install HeyDay:
