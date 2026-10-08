@@ -175,7 +175,7 @@ final class DayStore: ObservableObject {
   @Published var busy = 0
   /// True from a day switch until that day's first fetch lands.
   @Published var loading = true
-  @Published var now = Date()
+  @Published var now = DayStore.demo ? DayStore.demoNow() : Date()
   @Published var calendars: [CalendarRef] = []
   private var cache: [String: (events: [HeyEvent], todos: [HeyTodo])] = [:]
   private var personalId: Int64?
@@ -220,7 +220,7 @@ final class DayStore: ObservableObject {
 
   private func tick() {
     let wasToday = Calendar.current.isDate(now, inSameDayAs: date)
-    now = Date()
+    now = Self.demo ? Self.demoNow() : Date()
     if wasToday && !isToday { shift(0) }
   }
 
@@ -238,6 +238,12 @@ final class DayStore: ObservableObject {
 
   func refresh(force: Bool = false) async {
     if writing > 0 && !force { return }
+    if Self.demo {
+      events = Self.demoEvents()
+      now = Self.demoNow()
+      loading = false
+      return
+    }
     lastRefresh = Date()
     busy += 1
     defer { busy -= 1 }
@@ -257,6 +263,33 @@ final class DayStore: ObservableObject {
       self.error = error.localizedDescription
       if Calendar.current.isDate(target, inSameDayAs: date) { loading = false }
     }
+  }
+
+  static let demo = ProcessInfo.processInfo.environment["HEYDAY_DEMO"] != nil
+  static func demoNow() -> Date {
+    Calendar.current.date(bySettingHour: 11, minute: 20, second: 0, of: Date())!
+  }
+
+  /// Sample day with the clock pinned to 11:20, for screenshots (`HEYDAY_DEMO=1`).
+  static func demoEvents() -> [HeyEvent] {
+    let h = 11 * 60
+    func ev(_ i: Int, _ t: String, _ s: Int, _ d: Int, _ cal: String, rec: Bool = false, allDay: Bool = false)
+      -> HeyEvent
+    {
+      HeyEvent(
+        id: "demo\(i)", targetId: Int64(i), occurrence: nil, recurring: rec, title: t,
+        startMin: max(0, min(1380, s)), durMin: d, allDay: allDay, editable: true, calendar: cal)
+    }
+    return [
+      ev(0, "Product launch week", 0, 1440, "Work", allDay: true),
+      ev(1, "Morning run", h - 180, 45, "Personal", rec: true),
+      ev(2, "Standup", h - 90, 15, "Work", rec: true),
+      ev(3, "Deep work: onboarding flow", h - 30, 90, "Focus"),
+      ev(4, "Lunch", h + 90, 60, "Personal"),
+      ev(5, "Design review", h + 180, 60, "Work"),
+      ev(6, "1:1 with Sam", h + 210, 30, "Team"),
+      ev(7, "Write launch post", h + 300, 75, "Focus"),
+    ]
   }
 
   private func prefetchNeighbors(of day: Date) {
@@ -877,6 +910,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     window.setFrameAutosaveName("HeyDayWindow")
     applyLevel()
     window.orderFrontRegardless()
+    if let out = ProcessInfo.processInfo.environment["HEYDAY_SNAPSHOT"] {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [self] in
+        let v = window.contentView!
+        let rep = NSBitmapImageRep(
+          bitmapDataPlanes: nil, pixelsWide: Int(v.bounds.width * 2), pixelsHigh: Int(v.bounds.height * 2),
+          bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+          colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = v.bounds.size
+        v.cacheDisplay(in: v.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+        NSApp.terminate(nil)
+      }
+    }
 
     status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     status.button?.image = NSImage(

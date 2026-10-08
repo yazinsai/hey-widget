@@ -2,6 +2,8 @@
 
 A small macOS desktop widget that shows your [HEY Calendar](https://www.hey.com/calendar/) day as a timeline. It sits on the desktop (or floats above windows) and talks to HEY through the official [`hey` CLI](https://www.hey.com/agents/).
 
+<p align="center"><img src="docs/screenshot.png" width="321" alt="HeyDay widget showing a day timeline"></p>
+
 ## Features
 
 - Day timeline with a live "now" line and the current event highlighted
@@ -56,6 +58,14 @@ HeyDay looks for `hey` in `$HEY_PATH`, `~/go/bin`, `/opt/homebrew/bin`, `/usr/lo
 - A red dot next to the date means the last `hey` call failed; hover it for the error, click to dismiss.
 
 New events go to your **Personal** calendar by default; pick another in Settings.
+
+### Demo mode
+
+`HEYDAY_DEMO=1` shows sample events with the clock pinned to 11:20 (no `hey` calls). Add `HEYDAY_SNAPSHOT=out.png` to write a 2x PNG of the window and quit — that's how `docs/screenshot.png` is made:
+
+```sh
+HEYDAY_DEMO=1 HEYDAY_SNAPSHOT=$PWD/docs/screenshot.png ./build/HeyDay.app/Contents/MacOS/HeyDay
+```
 
 ## License
 
