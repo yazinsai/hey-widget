@@ -177,7 +177,10 @@ final class DayStore: ObservableObject {
   @Published var loading = true
   @Published var now = DayStore.demo ? DayStore.demoNow() : Date()
   @Published var calendars: [CalendarRef] = []
+  /// Shows the header controls during a scripted recording (no real hover).
+  @Published var demoHover = false
   private var cache: [String: (events: [HeyEvent], todos: [HeyTodo])] = [:]
+  private var demoDays: [String: [HeyEvent]] = [:]
   private var personalId: Int64?
   private var lastRefresh = Date.distantPast
 
@@ -204,6 +207,7 @@ final class DayStore: ObservableObject {
       Task { @MainActor in self?.shift(0) }
     }
     Task {
+      if Self.demo { return await refresh() }
       personalId = try? await Hey.personalCalendar()
       calendars = (try? await Hey.calendars()) ?? []
       await refresh()
@@ -239,7 +243,13 @@ final class DayStore: ObservableObject {
   func refresh(force: Bool = false) async {
     if writing > 0 && !force { return }
     if Self.demo {
-      events = Self.demoEvents()
+      if demoDays[key] == nil {
+        let offset = Calendar.current.dateComponents(
+          [.day], from: Calendar.current.startOfDay(for: Date()), to: Calendar.current.startOfDay(for: date)
+        ).day ?? 0
+        demoDays[key] = Self.demoEvents(offset)
+      }
+      events = demoDays[key]!
       now = Self.demoNow()
       loading = false
       return
@@ -271,7 +281,7 @@ final class DayStore: ObservableObject {
   }
 
   /// Sample day with the clock pinned to 11:20, for screenshots (`HEYDAY_DEMO=1`).
-  static func demoEvents() -> [HeyEvent] {
+  static func demoEvents(_ dayOffset: Int = 0) -> [HeyEvent] {
     let h = 11 * 60
     func ev(_ i: Int, _ t: String, _ s: Int, _ d: Int, _ cal: String, rec: Bool = false, allDay: Bool = false)
       -> HeyEvent
@@ -279,6 +289,16 @@ final class DayStore: ObservableObject {
       HeyEvent(
         id: "demo\(i)", targetId: Int64(i), occurrence: nil, recurring: rec, title: t,
         startMin: max(0, min(1380, s)), durMin: d, allDay: allDay, editable: true, calendar: cal)
+    }
+    if dayOffset != 0 {
+      let shift = (dayOffset * 37 % 4 + 4) % 4 * 30
+      return [
+        ev(10, "Morning run", h - 180, 45, "Personal", rec: true),
+        ev(11, "Customer call", h - 60 + shift, 60, "Work"),
+        ev(12, "Gym", h + 120, 60, "Personal"),
+        ev(13, "Sprint planning", h + 210 - shift, 90, "Team"),
+        ev(14, "Inbox zero", h + 360, 45, "Focus"),
+      ]
     }
     return [
       ev(0, "Product launch week", 0, 1440, "Work", allDay: true),
@@ -307,6 +327,10 @@ final class DayStore: ObservableObject {
 
   /// Runs a write, then re-reads the day so ids/occurrences match HEY.
   private func write(_ args: [String]) {
+    if Self.demo {
+      demoDays[key] = events
+      return
+    }
     writing += 1
     Task {
       busy += 1
@@ -325,6 +349,14 @@ final class DayStore: ObservableObject {
     let t = title.trimmingCharacters(in: .whitespaces)
     guard !t.isEmpty else { return }
     let s = max(0, min(startMin, 1440 - duration))
+    if Self.demo {
+      events.append(
+        HeyEvent(
+          id: "demo-\(UUID())", targetId: 99, occurrence: nil, recurring: false, title: t,
+          startMin: s, durMin: duration, allDay: false, editable: true, calendar: "Team"))
+      demoDays[key] = events
+      return
+    }
     events.append(
       HeyEvent(
         id: "pending-\(UUID())", targetId: 0, occurrence: nil, recurring: false, title: t,
@@ -477,7 +509,7 @@ struct RootView: View {
           .onTapGesture { store.error = nil }
       }
       Spacer()
-      if hovering {
+      if hovering || store.demoHover {
         Group {
           Button { store.shift(-1) } label: { Image(systemName: "chevron.left") }
           Button { store.shift(1) } label: { Image(systemName: "chevron.right") }
@@ -867,6 +899,138 @@ struct SettingsView: View {
   }
 }
 
+/// Drives the widget with synthetic input and writes PNG frames (`HEYDAY_RECORD=dir`).
+@MainActor
+final class DemoRecorder {
+  let window: NSWindow
+  let store: DayStore
+  let dir: String
+  var cursor = CGPoint(x: 300, y: 330)
+  var pressed = false
+  var frame = 0
+
+  init(window: NSWindow, store: DayStore, dir: String) {
+    self.window = window
+    self.store = store
+    self.dir = dir
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+  }
+
+  /// Top-left-origin y for a minute of the day, matching Timeline's layout.
+  func y(_ minute: Int) -> CGFloat {
+    let d = UserDefaults.standard
+    let start = d.integer(forKey: "startHour")
+    let hh = d.object(forKey: "hourHeight") == nil ? 52 : d.double(forKey: "hourHeight")
+    let top: CGFloat = 30 + (store.events.contains(where: \.allDay) ? 25 : 0) + 8
+    return top + CGFloat(Double(minute - start * 60) * hh / 60)
+  }
+
+  func capture() {
+    let v = window.contentView!
+    let b = v.bounds
+    let rep = NSBitmapImageRep(
+      bitmapDataPlanes: nil, pixelsWide: Int(b.width * 2), pixelsHigh: Int(b.height * 2),
+      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+      colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    rep.size = b.size
+    v.cacheDisplay(in: b, to: rep)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    let p = NSPoint(x: cursor.x, y: b.height - cursor.y)
+    if pressed {
+      NSColor.black.withAlphaComponent(0.18).setFill()
+      NSBezierPath(ovalIn: NSRect(x: p.x - 13, y: p.y - 13, width: 26, height: 26)).fill()
+    }
+    let img = NSCursor.arrow.image
+    let hot = NSCursor.arrow.hotSpot
+    img.draw(at: NSPoint(x: p.x - hot.x, y: p.y - img.size.height + hot.y), from: .zero, operation: .sourceOver, fraction: 1)
+    NSGraphicsContext.restoreGraphicsState()
+    let url = URL(fileURLWithPath: dir).appendingPathComponent(String(format: "f%05d.png", frame))
+    try? rep.representation(using: .png, properties: [:])?.write(to: url)
+    frame += 1
+  }
+
+  func tick(_ n: Int = 1) async {
+    for _ in 0..<n {
+      try? await Task.sleep(nanoseconds: 40_000_000)
+      capture()
+    }
+  }
+
+  func send(_ type: NSEvent.EventType, clicks: Int = 1) {
+    let loc = NSPoint(x: cursor.x, y: window.contentView!.bounds.height - cursor.y)
+    if let e = NSEvent.mouseEvent(
+      with: type, location: loc, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+      windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: clicks,
+      pressure: type == .leftMouseUp ? 0 : 1)
+    {
+      window.sendEvent(e)
+    }
+  }
+
+  /// Eased cursor glide; drags if the button is held.
+  func move(to p: CGPoint, frames: Int) async {
+    let a = cursor
+    for i in 1...frames {
+      let t = Double(i) / Double(frames)
+      let e = t < 0.5 ? 2 * t * t : 1 - pow(-2 * t + 2, 2) / 2
+      cursor = CGPoint(x: a.x + (p.x - a.x) * e, y: a.y + (p.y - a.y) * e)
+      if pressed { send(.leftMouseDragged) }
+      await tick()
+    }
+  }
+
+  func down() async { pressed = true; send(.leftMouseDown); await tick(2) }
+  func up() async { send(.leftMouseUp); pressed = false; await tick(2) }
+
+  func type(_ s: String) async {
+    for ch in s {
+      (window.firstResponder as? NSTextView)?.insertText(String(ch), replacementRange: NSRange(location: NSNotFound, length: 0))
+      await tick(2)
+    }
+  }
+
+  func run() async {
+    let x: CGFloat = 200
+    NSApp.activate(ignoringOtherApps: true)
+    window.makeKeyAndOrderFront(nil)
+    await tick(12)
+    // Drag out a new event in the free 3–4pm slot and name it.
+    await move(to: CGPoint(x: x, y: y(15 * 60 + 12)), frames: 14)
+    await down()
+    await move(to: CGPoint(x: x, y: y(16 * 60)), frames: 16)
+    await up()
+    await tick(6)
+    await type("Ship v1.0")
+    await tick(6)
+    (window.firstResponder as? NSTextView)?.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+    await tick(14)
+    // Stretch Lunch by half an hour from its bottom handle.
+    await move(to: CGPoint(x: 230, y: y(13 * 60 + 30) - 4), frames: 16)
+    await down()
+    await move(to: CGPoint(x: 230, y: y(14 * 60) + 12), frames: 14)
+    await up()
+    await tick(14)
+    // Flip through days, then jump back with Today.
+    store.demoHover = true
+    let w = window.contentView!.bounds.width
+    let next = CGPoint(x: w - 52, y: 15)
+    await move(to: next, frames: 18)
+    for _ in 0..<2 {
+      pressed = true; await tick(2)
+      store.shift(1)
+      pressed = false; await tick(16)
+    }
+    await move(to: CGPoint(x: 92, y: 15), frames: 16)
+    pressed = true; await tick(2)
+    store.shift(0)
+    pressed = false; await tick(6)
+    store.demoHover = false
+    await move(to: CGPoint(x: 300, y: 330), frames: 18)
+    await tick(10)
+  }
+}
+
 /// A desktop-level window only takes typing once the app is active and it is key.
 func focusWidget(_ then: @escaping () -> Void) {
   NSApp.activate(ignoringOtherApps: true)
@@ -910,6 +1074,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     window.setFrameAutosaveName("HeyDayWindow")
     applyLevel()
     window.orderFrontRegardless()
+    if let dir = ProcessInfo.processInfo.environment["HEYDAY_RECORD"] {
+      window.setFrame(NSRect(x: 60, y: 120, width: 340, height: 485), display: true)
+      let rec = DemoRecorder(window: window, store: store, dir: dir)
+      Task { @MainActor in
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        await rec.run()
+        NSApp.terminate(nil)
+      }
+    }
     if let out = ProcessInfo.processInfo.environment["HEYDAY_SNAPSHOT"] {
       DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [self] in
         let v = window.contentView!

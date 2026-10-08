@@ -2,7 +2,7 @@
 
 A small macOS desktop widget that shows your [HEY Calendar](https://www.hey.com/calendar/) day as a timeline. It sits on the desktop (or floats above windows) and talks to HEY through the official [`hey` CLI](https://www.hey.com/agents/).
 
-![HeyDay on the macOS desktop, showing a day timeline](docs/screenshot-desktop.png)
+<p align="center"><img src="docs/demo.gif" width="400" alt="HeyDay demo: drag to create an event, resize one, switch days"></p>
 
 ## Features
 
@@ -68,7 +68,9 @@ HEYDAY_DEMO=1 HEYDAY_SNAPSHOT=$PWD/docs/screenshot.png ./build/HeyDay.app/Conten
 swift scripts/desktop-shot.swift docs/screenshot.png docs/screenshot-desktop.png
 ```
 
-The second command places it on a generated desktop for the README image.
+The second command places it on a generated desktop.
+
+`scripts/demo-gif.sh` renders `docs/demo.gif`: with `HEYDAY_RECORD=dir` the app plays a scripted session (drag-create, type, resize, switch days) using synthetic input and writes each frame, then ffmpeg turns them into a GIF. Needs ffmpeg and ImageMagick.
 
 ## License
 
