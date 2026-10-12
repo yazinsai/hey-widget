@@ -1,19 +1,37 @@
-# HeyDay
+<h1 align="center">HeyDay</h1>
 
-A small macOS desktop widget that shows your [HEY Calendar](https://www.hey.com/calendar/) day as a timeline. It sits on the desktop (or floats above windows) and talks to HEY through the official [`hey` CLI](https://www.hey.com/agents/).
+<p align="center"><strong>Your HEY Calendar, always on your desktop.</strong><br>
+See your whole day at a glance, and plan it by dragging, without opening a browser tab.</p>
+
+<p align="center">
+  <a href="https://github.com/yazinsai/hey-widget/releases/latest/download/HeyDay.zip"><img src="https://img.shields.io/badge/Download-HeyDay%20for%20macOS-111?style=for-the-badge&logo=apple" alt="Download HeyDay for macOS"></a>
+</p>
+<p align="center">
+  <img src="https://img.shields.io/github/v/release/yazinsai/hey-widget?label=release" alt="Latest release">
+  <img src="https://img.shields.io/badge/macOS-13%2B-blue" alt="macOS 13+">
+  <img src="https://img.shields.io/badge/notarized-Apple-success" alt="Notarized by Apple">
+  <img src="https://img.shields.io/github/license/yazinsai/hey-widget" alt="MIT license">
+</p>
 
 <p align="center"><img src="docs/demo.gif" width="400" alt="HeyDay demo: drag to create an event, resize one, switch days"></p>
 
+## Why HeyDay
+
+- **Know what's next without looking for it.** Your day sits on the desktop as a timeline, with a live "now" line and the current event highlighted.
+- **Plan by hand, not by form.** Drag empty space to create an event. Drag an event to move it, pull its edge to resize, double-click to rename.
+- **Instant, even when switching days.** Days are cached and neighbouring days prefetched, so flipping through your week feels local.
+- **Set up in under a minute.** Download, open, click **Install**, sign in. No Terminal, no config files.
+- **Stays out of the way.** It lives behind your windows like part of the wallpaper, or floats above them if you prefer. It opens at login and runs from the menu bar.
+
 ## Features
 
-- Day timeline with a live "now" line and the current event highlighted
-- Drag on empty space to create an event, or double-click for a quick one
-- Drag events to move them, drag the bottom edge to resize, double-click to rename, right-click to delete
-- Repeating events: edits apply to that day's occurrence only
+- Day timeline with live "now" line and current-event highlight
+- Create events by dragging, or double-click for a quick one
+- Move, resize, rename and delete events in place
+- Repeating events: edits apply to that day only, never the whole series
 - All-day events in a strip under the header
-- Browse days with the arrows (hover the header); **Today** jumps back
-- Cached days and background prefetch of the neighbouring days, so switching is instant
-- Settings: target calendar, time zone, double-click length, hour height, visible hours (e.g. 8a–5p), float above windows
+- Day navigation with a one-click jump back to **Today**
+- Settings: target calendar, time zone, quick-event length, hour height, visible hours (e.g. 8a–5p), float above windows, open at login
 
 ## Install
 
