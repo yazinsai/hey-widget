@@ -1,4 +1,6 @@
 import AppKit
+import Combine
+import ServiceManagement
 import SwiftUI
 
 // MARK: - Models
@@ -39,36 +41,70 @@ struct Draft: Equatable {
 // MARK: - hey CLI
 
 enum Hey {
-  static let path: String = {
+  /// Same home the `hey` child process sees; `NSHomeDirectory()` ignores $HOME.
+  static let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+  /// Where the official installer puts it when run from the app.
+  static let installDir = "\(home)/.local/bin"
+
+  /// Re-resolved on every call: a GUI app's PATH never sees shell profiles, and the CLI can
+  /// appear mid-session after an in-app install.
+  static var path: String? {
     let candidates = [
       ProcessInfo.processInfo.environment["HEY_PATH"],
-      "\(NSHomeDirectory())/go/bin/hey",
+      "\(installDir)/hey",
+      "\(home)/bin/hey",
+      "\(home)/go/bin/hey",
       "/opt/homebrew/bin/hey",
       "/usr/local/bin/hey",
     ].compactMap { $0 }
-    return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? "hey"
-  }()
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+  }
+
+  /// Runs to completion, draining output while it runs so a full pipe can't stall the child.
+  static func exec(
+    _ exe: String, _ args: [String], env: [String: String] = [:], stderr: Bool = false
+  ) async throws -> (
+    status: Int32, out: Data
+  ) {
+    try await withCheckedThrowingContinuation { cont in
+      DispatchQueue.global().async {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = args
+        p.environment = ProcessInfo.processInfo.environment.merging(env) { $1 }
+        p.standardInput = FileHandle.nullDevice
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = stderr ? out : FileHandle.nullDevice
+        do { try p.run() } catch { return cont.resume(throwing: error) }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        cont.resume(returning: (p.terminationStatus, data))
+      }
+    }
+  }
 
   static func run(_ args: [String]) async throws -> Any {
-    try await withCheckedThrowingContinuation { cont in
-      let p = Process()
-      p.executableURL = URL(fileURLWithPath: path)
-      p.arguments = args + ["--json"]
-      let out = Pipe()
-      p.standardOutput = out
-      p.standardError = Pipe()
-      p.terminationHandler = { _ in
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-          return cont.resume(throwing: HeyError("bad output from hey \(args.joined(separator: " "))"))
-        }
-        if obj["ok"] as? Bool == false {
-          let hint = (obj["hint"] as? String).map { " — \($0)" } ?? ""
-          return cont.resume(throwing: HeyError((obj["error"] as? String ?? "hey failed") + hint))
-        }
-        cont.resume(returning: obj["data"] ?? NSNull())
-      }
-      do { try p.run() } catch { cont.resume(throwing: error) }
+    guard let path else { throw HeyError("hey CLI not installed", code: "missing") }
+    let data = try await exec(path, args + ["--json"]).out
+    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      throw HeyError("bad output from hey \(args.joined(separator: " "))")
+    }
+    if obj["ok"] as? Bool == false {
+      let hint = (obj["hint"] as? String).map { " — \($0)" } ?? ""
+      throw HeyError((obj["error"] as? String ?? "hey failed") + hint, code: obj["code"] as? String)
+    }
+    return obj["data"] ?? NSNull()
+  }
+
+  /// HEY's official installer, non-interactive: no setup wizard, no coding-agent hookup.
+  static func install() async throws {
+    let (status, out) = try await exec(
+      "/bin/bash", ["-c", "set -o pipefail; curl -fsSL https://hey.com/install-cli | bash"],
+      env: ["HEY_BIN_DIR": installDir, "HEY_SKIP_SETUP": "1", "HEY_SETUP_AGENT": "none"], stderr: true)
+    guard status == 0, path != nil else {
+      let last = String(decoding: out, as: UTF8.self).split(separator: "\n").last { !$0.isBlank }
+      throw HeyError(last.map { String($0).trimmingCharacters(in: .whitespaces) } ?? "Install failed")
     }
   }
 
@@ -159,8 +195,23 @@ enum Hey {
 
 struct HeyError: LocalizedError {
   let msg: String
-  init(_ m: String) { msg = m }
+  /// hey's machine-readable error code, e.g. "auth".
+  let code: String?
+  init(_ m: String, code: String? = nil) {
+    msg = m
+    self.code = code
+  }
   var errorDescription: String? { msg }
+}
+
+extension Substring {
+  var isBlank: Bool { allSatisfy(\.isWhitespace) }
+}
+
+enum SetupStep: Equatable {
+  case checking, install, installing, login
+  case loggingIn(URL?)
+  case ready
 }
 
 // MARK: - Store
@@ -207,10 +258,108 @@ final class DayStore: ObservableObject {
       Task { @MainActor in self?.shift(0) }
     }
     Task {
-      if Self.demo { return await refresh() }
-      personalId = try? await Hey.personalCalendar()
-      calendars = (try? await Hey.calendars()) ?? []
-      await refresh()
+      if Self.demo {
+        setup = .ready
+        return await refresh()
+      }
+      await checkSetup()
+    }
+  }
+
+  // MARK: Onboarding
+
+  @Published var setup: SetupStep = .checking
+  @Published var setupError: String?
+  private var loginProcess: Process?
+  private var loginOutput = ""
+
+  func checkSetup() async {
+    setupError = nil
+    guard Hey.path != nil else { return setup = .install }
+    // A network failure here shouldn't bounce a signed-in user to sign-in; refresh reports it.
+    if let s = try? await Hey.run(["auth", "status"]) as? [String: Any],
+      s["authenticated"] as? Bool == false
+    {
+      return setup = .login
+    }
+    setup = .ready
+    personalId = try? await Hey.personalCalendar()
+    calendars = (try? await Hey.calendars()) ?? []
+    await refresh()
+  }
+
+  func installCLI() {
+    setup = .installing
+    setupError = nil
+    Task {
+      do {
+        try await Hey.install()
+        await checkSetup()
+      } catch {
+        setupError = error.localizedDescription
+        setup = .install
+      }
+    }
+  }
+
+  /// `--no-browser` so we own the URL: we open it, and can reopen it if the tab gets lost.
+  func login() {
+    guard let path = Hey.path else { return setup = .install }
+    setupError = nil
+    loginOutput = ""
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = ["auth", "login", "--no-browser"]
+    p.standardInput = FileHandle.nullDevice
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = out
+    out.fileHandleForReading.readabilityHandler = { [weak self] h in
+      let chunk = String(decoding: h.availableData, as: UTF8.self)
+      Task { @MainActor in self?.loginRead(chunk) }
+    }
+    p.terminationHandler = { [weak self] p in
+      out.fileHandleForReading.readabilityHandler = nil
+      Task { @MainActor in
+        guard let self, self.loginProcess === p else { return }
+        self.loginProcess = nil
+        if p.terminationStatus == 0 { return await self.checkSetup() }
+        self.setupError = "Sign-in didn't complete. Try again."
+        self.setup = .login
+      }
+    }
+    do {
+      try p.run()
+      loginProcess = p
+      setup = .loggingIn(nil)
+    } catch {
+      setupError = error.localizedDescription
+    }
+  }
+
+  private func loginRead(_ chunk: String) {
+    loginOutput += chunk
+    guard setup == .loggingIn(nil),
+      let m = loginOutput.firstMatch(of: /(https:\/\/\S+)\s/), let url = URL(string: String(m.1))
+    else { return }
+    setup = .loggingIn(url)
+    NSWorkspace.shared.open(url)
+  }
+
+  func cancelLogin() {
+    let p = loginProcess
+    loginProcess = nil
+    p?.terminate()
+    setup = .login
+  }
+
+  func signOut() {
+    Task {
+      _ = try? await Hey.run(["auth", "logout"])
+      cache = [:]
+      events = []
+      todos = []
+      setup = Hey.path == nil ? .install : .login
     }
   }
 
@@ -254,6 +403,7 @@ final class DayStore: ObservableObject {
       loading = false
       return
     }
+    guard setup == .ready else { return }
     lastRefresh = Date()
     busy += 1
     defer { busy -= 1 }
@@ -270,6 +420,9 @@ final class DayStore: ObservableObject {
       loading = false
       prefetchNeighbors(of: target)
     } catch {
+      if let e = error as? HeyError, e.code == "auth" || e.code == "missing" {
+        return setup = e.code == "auth" ? .login : .install
+      }
       self.error = error.localizedDescription
       if Calendar.current.isDate(target, inSameDayAs: date) { loading = false }
     }
@@ -469,15 +622,19 @@ struct RootView: View {
   var body: some View {
     VStack(spacing: 0) {
       header
-      allDayStrip
-      Timeline(store: store, hourHeight: hourHeight)
-        .opacity(store.loading ? 0.4 : 1)
-        .overlay {
-          if store.loading {
-            ProgressView().controlSize(.small)
+      if store.setup == .ready {
+        allDayStrip
+        Timeline(store: store, hourHeight: hourHeight)
+          .opacity(store.loading ? 0.4 : 1)
+          .overlay {
+            if store.loading {
+              ProgressView().controlSize(.small)
+            }
           }
-        }
-        .animation(.easeOut(duration: 0.15), value: store.loading)
+          .animation(.easeOut(duration: 0.15), value: store.loading)
+      } else {
+        OnboardingView(store: store)
+      }
     }
     .background(.ultraThinMaterial)
     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -509,7 +666,7 @@ struct RootView: View {
           .onTapGesture { store.error = nil }
       }
       Spacer()
-      if hovering || store.demoHover {
+      if (hovering || store.demoHover) && store.setup == .ready {
         Group {
           Button { store.shift(-1) } label: { Image(systemName: "chevron.left") }
           Button { store.shift(1) } label: { Image(systemName: "chevron.right") }
@@ -539,6 +696,74 @@ struct RootView: View {
     }
   }
 
+}
+
+struct OnboardingView: View {
+  @ObservedObject var store: DayStore
+
+  var body: some View {
+    VStack(spacing: 14) {
+      Spacer()
+      switch store.setup {
+      case .checking, .ready:
+        ProgressView().controlSize(.small)
+      case .install:
+        card(
+          step: 1, icon: "arrow.down.circle", title: "Install the hey CLI",
+          body: "HeyDay talks to HEY through its official command-line tool. "
+            + "It installs into your home folder — no admin password."
+        ) {
+          Button("Install") { store.installCLI() }.keyboardShortcut(.defaultAction)
+        }
+      case .installing:
+        card(step: 1, icon: "arrow.down.circle", title: "Installing…", body: "This takes about 15 seconds.") {
+          ProgressView().controlSize(.small)
+        }
+      case .login:
+        card(
+          step: 2, icon: "person.crop.circle.badge.checkmark", title: "Sign in to HEY",
+          body: "Your browser will open so you can approve access. Nothing is stored by HeyDay itself."
+        ) {
+          Button("Sign in with HEY") { store.login() }.keyboardShortcut(.defaultAction)
+        }
+      case .loggingIn(let url):
+        card(
+          step: 2, icon: "safari", title: "Finish in your browser",
+          body: "Approve access in the HEY tab, then come back here."
+        ) {
+          HStack {
+            Button("Cancel") { store.cancelLogin() }.buttonStyle(.bordered)
+            if let url {
+              Button("Reopen browser") { NSWorkspace.shared.open(url) }
+            } else {
+              ProgressView().controlSize(.small)
+            }
+          }
+        }
+      }
+      if let e = store.setupError {
+        Text(e).font(.system(size: 11)).foregroundStyle(.red)
+          .multilineTextAlignment(.center).textSelection(.enabled)
+      }
+      Spacer()
+    }
+    .padding(.horizontal, 24)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  func card<Actions: View>(
+    step: Int, icon: String, title: String, body: String, @ViewBuilder actions: () -> Actions
+  ) -> some View {
+    VStack(spacing: 10) {
+      Text("STEP \(step) OF 2").font(.system(size: 10, weight: .bold, design: .rounded))
+        .foregroundStyle(.secondary)
+      Image(systemName: icon).font(.system(size: 30, weight: .light)).foregroundStyle(Color.accentColor)
+      Text(title).font(.system(size: 15, weight: .semibold, design: .rounded))
+      Text(body).font(.system(size: 12)).foregroundStyle(.secondary)
+        .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+      actions().controlSize(.large).buttonStyle(.borderedProminent).padding(.top, 4)
+    }
+  }
 }
 
 struct Timeline: View {
@@ -864,6 +1089,7 @@ struct SettingsView: View {
   @AppStorage("onTop") private var onTop = false
   @AppStorage("startHour") private var startHour = 0
   @AppStorage("endHour") private var endHour = 24
+  @State private var openAtLogin = LoginItem.enabled
 
   var body: some View {
     Form {
@@ -892,6 +1118,10 @@ struct SettingsView: View {
       }
       Toggle("Float above windows", isOn: $onTop)
         .onChange(of: onTop, perform: onTopChanged)
+      Toggle("Open at login", isOn: $openAtLogin)
+        .onChange(of: openAtLogin) { LoginItem.enabled = $0 }
+        .disabled(!LoginItem.canRegister && !openAtLogin)
+        .help(LoginItem.canRegister ? "" : "Move HeyDay to Applications first")
     }
     .formStyle(.grouped)
     .frame(width: 400)
@@ -1049,10 +1279,20 @@ struct WindowDragArea: NSViewRepresentable {
 
 // MARK: - App
 
+enum LoginItem {
+  /// Registering from a translocated or Downloads copy would point login at a path that vanishes.
+  static var canRegister: Bool { Bundle.main.bundlePath.contains("/Applications/") }
+  static var enabled: Bool {
+    get { SMAppService.mainApp.status == .enabled }
+    set { _ = try? newValue ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister() }
+  }
+}
+
 final class DesktopWindow: NSWindow {
   override var canBecomeKey: Bool { true }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   var window: DesktopWindow!
   var status: NSStatusItem!
@@ -1072,6 +1312,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
     window.contentView = NSHostingView(rootView: RootView(store: store))
     window.setFrameAutosaveName("HeyDayWindow")
+    // A frame saved on a since-disconnected display would leave the widget unreachable.
+    if !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(window.frame) }),
+      let screen = NSScreen.main?.visibleFrame
+    {
+      window.setFrame(
+        NSRect(x: screen.minX + 60, y: screen.maxY - 660, width: 340, height: min(640, screen.height - 40)),
+        display: false)
+    }
     applyLevel()
     window.orderFrontRegardless()
     if let dir = ProcessInfo.processInfo.environment["HEYDAY_RECORD"] {
@@ -1103,18 +1351,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let menu = NSMenu()
     menu.addItem(withTitle: "Refresh", action: #selector(refresh), keyEquivalent: "r")
     menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+    menu.addItem(withTitle: "Sign Out of HEY", action: #selector(signOut), keyEquivalent: "")
     menu.addItem(.separator())
     menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     menu.items.forEach { if $0.action != #selector(NSApplication.terminate(_:)) { $0.target = self } }
     status.menu = menu
+
+    setupWatch = store.$setup.removeDuplicates().sink { [weak self] step in
+      DispatchQueue.main.async { self?.setupChanged(step) }
+    }
+  }
+
+  var setupWatch: AnyCancellable?
+
+  /// A desktop-level window hides behind everything, so onboarding floats until it's done.
+  func setupChanged(_ step: SetupStep) {
+    applyLevel()
+    if step != .ready && step != .checking {
+      NSApp.activate(ignoringOtherApps: true)
+      window.makeKeyAndOrderFront(nil)
+    }
+    if step == .ready && !UserDefaults.standard.bool(forKey: "loginItemOffered") && LoginItem.canRegister {
+      UserDefaults.standard.set(true, forKey: "loginItemOffered")
+      LoginItem.enabled = true
+    }
   }
 
   func applyLevel() {
-    window.level =
-      onTop ? .floating : NSWindow.Level(Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+    let float = onTop || (store.setup != .ready && store.setup != .checking)
+    window.level = float ? .floating : NSWindow.Level(Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
   }
 
+  func applicationWillTerminate(_ n: Notification) { store.cancelLogin() }
+
   @objc func refresh() { Task { await store.refresh() } }
+  @objc func signOut() { store.signOut() }
 
   @objc func openSettings() {
     if settings == nil {
@@ -1137,7 +1408,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.accessory)
-app.run()
+MainActor.assumeIsolated {
+  let delegate = AppDelegate()
+  app.delegate = delegate
+  app.setActivationPolicy(.accessory)
+  app.run()
+}

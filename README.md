@@ -15,40 +15,50 @@ A small macOS desktop widget that shows your [HEY Calendar](https://www.hey.com/
 - Cached days and background prefetch of the neighbouring days, so switching is instant
 - Settings: target calendar, time zone, double-click length, hour height, visible hours (e.g. 8a–5p), float above windows
 
-## Requirements
+## Install
 
-- macOS 13 or later
-- Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
-- A HEY account and the `hey` CLI
+You need macOS 13 or later and a HEY account. That's it.
 
-## Setup
+[**Download HeyDay.zip**](https://github.com/yazinsai/hey-widget/releases/latest/download/HeyDay.zip), unzip, drag `HeyDay.app` into Applications and open it. It's signed and notarized by Apple, so it opens like any other app.
 
-1. Install the `hey` CLI:
+Or from Terminal:
 
-   ```sh
-   curl -fsSL https://hey.com/install-cli | bash
-   ```
+```sh
+curl -fsSL https://github.com/yazinsai/hey-widget/releases/latest/download/HeyDay.zip -o /tmp/HeyDay.zip && ditto -xk /tmp/HeyDay.zip /Applications && open /Applications/HeyDay.app
+```
 
-   Or with Go: `go install github.com/basecamp/hey-cli/cmd/hey@latest`
+### First run
 
-2. Sign in. The first run of `hey` walks you through browser authentication (or run `hey setup` / `hey login` any time). Check it worked:
+HeyDay walks you through the rest in the widget itself:
 
-   ```sh
-   hey auth status
-   hey calendar list
-   ```
+1. **Install the hey CLI**: one click. It runs HEY's [official installer](https://www.hey.com/agents/) into `~/.local/bin`. No admin password, nothing else to set up.
+2. **Sign in to HEY**: your browser opens HEY's sign-in page. Approve it and the widget loads your day.
 
-3. Build and install HeyDay:
+If you already have the `hey` CLI and are signed in, HeyDay skips straight to your calendar. It also adds itself to your login items; turn that off under Settings → Open at login.
 
-   ```sh
-   git clone https://github.com/yazinsai/hey-widget.git
-   cd hey-widget
-   ./build.sh install
-   ```
+HeyDay looks for `hey` in `$HEY_PATH`, `~/.local/bin`, `~/bin`, `~/go/bin`, `/opt/homebrew/bin`, then `/usr/local/bin`. Use the menu bar icon → **Sign Out of HEY** to switch accounts.
 
-   This builds `HeyDay.app`, copies it to `~/Applications`, adds it to your login items and launches it. Use `./build.sh` alone to just build into `build/`.
+### Build from source
 
-HeyDay looks for `hey` in `$HEY_PATH`, `~/go/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, then your `PATH`. If yours lives elsewhere, set `HEY_PATH` to the full path of the binary.
+Needs Xcode Command Line Tools (`xcode-select --install`).
+
+```sh
+git clone https://github.com/yazinsai/hey-widget.git
+cd hey-widget
+./build.sh install
+```
+
+This builds `HeyDay.app`, copies it to `~/Applications` and launches it. `./build.sh` alone builds into `build/`.
+
+### Releasing
+
+Needs a Developer ID Application certificate in your keychain and a notarytool profile (`xcrun notarytool store-credentials heyday-notary ...`). Then:
+
+```sh
+PUBLISH=1 VERSION=v0.2.0 ./build.sh release
+```
+
+That builds a universal (Apple silicon + Intel) app, signs it with hardened runtime, notarizes and staples it, then tags the version and creates the GitHub release with `build/HeyDay.zip`. Without `PUBLISH=1` it stops after the notarized zip.
 
 ## Usage
 
